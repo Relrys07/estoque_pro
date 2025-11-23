@@ -1,0 +1,418 @@
+import sqlite3
+import pandas as pd
+import streamlit as st
+from datetime import datetime
+
+# --- Funções de Banco de Dados ---
+
+def init_db():
+    # Reaproveita conexão durante a sessão Streamlit
+    if 'conn' in st.session_state:
+        return st.session_state['conn']
+    conn = sqlite3.connect('estoque.db', check_same_thread=False)
+    c = conn.cursor()
+    # Tabela de usuários
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT
+        )
+    ''')
+    # Tabela de estoque atual
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS estoque (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT UNIQUE,
+            quantidade INTEGER,
+            responsavel TEXT,
+            data_entrada TEXT
+        )
+    ''')
+    # Tabela de histórico de movimentações
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS historico (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            nome TEXT,
+            quantidade INTEGER,
+            tipo TEXT, -- 'entrada' ou 'saida'
+            responsavel TEXT,
+            data_hora TEXT
+        )
+    ''')
+    conn.commit()
+    st.session_state['conn'] = conn
+    return conn
+
+def get_conn():
+    return init_db()
+
+# --- Funções de Operações de Estoque ---
+
+def adicionar_estoque(nome, quantidade, responsavel):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, quantidade FROM estoque WHERE nome = ?", (nome,))
+    row = c.fetchone()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if row:
+        # Item já existe, soma a quantidade
+        novo_total = row[1] + quantidade
+        c.execute("UPDATE estoque SET quantidade = ?, responsavel = ?, data_entrada = ? WHERE id = ?", 
+                  (novo_total, responsavel, now, row[0]))
+    else:
+        # Novo item
+        c.execute("INSERT INTO estoque (nome, quantidade, responsavel, data_entrada) VALUES (?, ?, ?, ?)",
+                  (nome, quantidade, responsavel, now))
+    # Log de entrada
+    c.execute("INSERT INTO historico (nome, quantidade, tipo, responsavel, data_hora) VALUES (?, ?, ?, ?, ?)",
+              (nome, quantidade, 'entrada', responsavel, now))
+    conn.commit()
+
+
+def adicionar_estoque_com_data(nome, quantidade, responsavel, data_entrada=None):
+    """Versão que permite fornecer `data_entrada` opcional (string)."""
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, quantidade FROM estoque WHERE nome = ?", (nome,))
+    row = c.fetchone()
+    now = data_entrada if data_entrada else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if row:
+        novo_total = row[1] + quantidade
+        c.execute("UPDATE estoque SET quantidade = ?, responsavel = ?, data_entrada = ? WHERE id = ?", 
+                  (novo_total, responsavel, now, row[0]))
+    else:
+        c.execute("INSERT INTO estoque (nome, quantidade, responsavel, data_entrada) VALUES (?, ?, ?, ?)",
+                  (nome, quantidade, responsavel, now))
+    c.execute("INSERT INTO historico (nome, quantidade, tipo, responsavel, data_hora) VALUES (?, ?, ?, ?, ?)",
+              (nome, quantidade, 'entrada', responsavel, now))
+    conn.commit()
+
+def retirar_estoque(nome, quantidade, responsavel):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT id, quantidade FROM estoque WHERE nome = ?", (nome,))
+    row = c.fetchone()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if row:
+        estoque_atual = row[1]
+        if quantidade > estoque_atual:
+            return False, "Estoque insuficiente."
+        novo_total = estoque_atual - quantidade
+        c.execute("UPDATE estoque SET quantidade = ?, responsavel = ?, data_entrada = ? WHERE id = ?", 
+                  (novo_total, responsavel, now, row[0]))
+        # Log de saída
+        c.execute("INSERT INTO historico (nome, quantidade, tipo, responsavel, data_hora) VALUES (?, ?, ?, ?, ?)",
+                  (nome, quantidade, 'saida', responsavel, now))
+        conn.commit()
+        return True, "Retirada realizada com sucesso."
+    else:
+        return False, "Item não encontrado."
+
+def get_estoque():
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT nome, quantidade, responsavel, data_entrada FROM estoque", conn)
+    return df
+
+def get_historico():
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM historico ORDER BY data_hora DESC", conn)
+    return df
+
+def excluir_item(nome):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM estoque WHERE nome = ?", (nome,))
+    conn.commit()
+
+def excluir_historico(id):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM historico WHERE id = ?", (id,))
+    conn.commit()
+
+# --- Funções de Autenticação (Simples) ---
+
+def cadastro_usuario(username, password):
+    conn = get_conn()
+    c = conn.cursor()
+    try:
+        c.execute("INSERT INTO usuarios (username, password) VALUES (?, ?)", (username, password))
+        conn.commit()
+        return True
+    except:
+        return False
+
+def verificar_usuario(username, password):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("SELECT * FROM usuarios WHERE username = ? AND password = ?", (username, password))
+    return c.fetchone() is not None
+
+# --- Interface do Streamlit ---
+
+st.set_page_config(page_title="Controle de Estoque", layout="wide")
+
+# Variável global de usuário
+if 'user' not in st.session_state:
+    st.session_state['user'] = None
+
+# Página de Login / Cadastro
+if st.session_state['user'] is None:
+    st.title("Login ou Cadastro")
+    modo = st.radio("Escolha uma opção:", ["Login", "Cadastro"])
+
+    if modo == "Cadastro":
+        st.subheader("Cadastro de Novo Usuário")
+        username = st.text_input("Usuário")
+        password = st.text_input("Senha", type="password")
+        if st.button("Cadastrar"):
+            sucesso = cadastro_usuario(username, password)
+            if sucesso:
+                st.success("Cadastro realizado! Faça login.")
+            else:
+                st.error("Usuário já existe.")
+    else:
+        st.subheader("Login")
+        username = st.text_input("Usuário")
+        password = st.text_input("Senha", type="password")
+        if st.button("Entrar"):
+            if verificar_usuario(username, password):
+                st.session_state['user'] = username
+                st.success(f"Bem-vindo, {username}!")
+            else:
+                st.error("Credenciais incorretas.")
+else:
+    # Menu lateral (botões maiores e link/QR para celular)
+    st.sidebar.markdown("### Menu")
+
+    if 'menu' not in st.session_state:
+        st.session_state['menu'] = 'Entrada'
+
+    # Large buttons in sidebar to act as menu
+    if st.sidebar.button('📥 Entrada', key='btn_entrada'):
+        st.session_state['menu'] = 'Entrada'
+    if st.sidebar.button('📤 Saída', key='btn_saida'):
+        st.session_state['menu'] = 'Saída'
+    if st.sidebar.button('📊 Relatórios', key='btn_rel'):
+        st.session_state['menu'] = 'Relatórios'
+    if st.sidebar.button('⎋ Sair', key='btn_sair'):
+        st.session_state['user'] = None
+        st.experimental_rerun()
+
+    opção = st.session_state['menu']
+
+    # Show link and QR code to open the app from a mobile device on the same network
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        local_ip = 'localhost'
+
+    porta = 8501
+    mobile_url = f"http://{local_ip}:{porta}"
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("**Abrir no celular**")
+    st.sidebar.markdown(f"[Abrir este link no navegador do celular]({mobile_url})")
+    qr_src = f"https://chart.googleapis.com/chart?cht=qr&chs=240x240&chl={mobile_url}"
+    st.sidebar.image(qr_src, width=180)
+
+    if opção == "Sair":
+        st.session_state['user'] = None
+        st.experimental_rerun()
+
+    # Top header + tabs layout (visual refresh)
+    st.markdown(
+        """
+        <style>
+        /* Google Fonts */
+        @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&family=Playfair+Display:wght@400;700&display=swap');
+
+        :root{
+            --bg-start:#f3f8ff;
+            --bg-end:#eef6ff;
+            --primary:#2b7dfc;
+            --accent:#7cc6ff;
+            --muted:#6b7280;
+            --card:#ffffff;
+        }
+
+        /* Page background */
+        .block-container{background:linear-gradient(180deg,var(--bg-start),var(--bg-end));padding:36px 48px}
+
+        /* Header */
+        .app-header{display:flex;align-items:center;gap:18px;padding:8px 0}
+        .app-logo{width:64px;height:64px;background:linear-gradient(135deg,var(--primary),var(--accent));border-radius:14px;display:inline-block;box-shadow:0 8px 24px rgba(43,125,252,0.18)}
+        .app-title{font-family:'Playfair Display',serif;font-size:34px;font-weight:700;margin:0;color:#0b2546}
+        .app-sub{font-family:'Poppins',sans-serif;color:var(--muted);margin-top:4px}
+
+        /* Card */
+        .card{background:var(--card);padding:26px;border-radius:14px;box-shadow:0 10px 30px rgba(11,37,70,0.06);border:1px solid rgba(11,37,70,0.03)}
+
+        /* Inputs and selects */
+        input, textarea, select {
+            border-radius:10px !important;
+            padding:12px !important;
+            border:1px solid rgba(11,37,70,0.08) !important;
+            background:linear-gradient(180deg,#fff,#fbfdff) !important;
+            box-shadow:inset 0 1px 0 rgba(255,255,255,0.6);
+            font-family: 'Poppins', sans-serif !important;
+        }
+        .stTextInput>div>div>input {padding:12px 14px}
+
+        /* Primary button */
+        .stButton>button{
+            background:linear-gradient(90deg,var(--primary),#1e6fe8) !important;
+            color:#fff !important;
+            border-radius:12px !important;
+            height:52px !important;
+            padding:0 28px !important;
+            font-family:'Poppins',sans-serif !important;
+            font-weight:600 !important;
+            box-shadow:0 8px 20px rgba(43,125,252,0.18) !important;
+        }
+        .stButton>button:hover{transform:translateY(-1px)}
+
+        /* Tables */
+        .stDataFrame table {border-radius:10px;overflow:hidden}
+
+        /* Footer quote */
+        .inspire{margin-top:28px;text-align:center;color:var(--muted);font-family:'Poppins',sans-serif}
+        .inspire b{color:var(--primary);font-weight:700}
+
+        /* Small responsive tweaks */
+        @media (max-width: 768px){
+            .app-title{font-size:22px}
+            .block-container{padding:18px}
+        }
+
+        /* Text contrast and visibility tweaks */
+        :root{--text:#0b2546;--text-strong:#071833;--muted-2:#475569}
+
+        /* Apply stronger default text color across common containers */
+        .stApp, .block-container, .stText, .stMarkdown, .stRadio, .stSelectbox, .stNumberInput, .stTextInput, h1, h2, h3, h4, p, label {
+            color: var(--text) !important;
+            font-family: 'Poppins', sans-serif !important;
+        }
+
+        /* Input text color (ensure entered text is visible) */
+        input, textarea, select {
+            color: var(--text-strong) !important;
+        }
+
+        /* Table/text inside dataframes */
+        .stDataFrame table th, .stDataFrame table td {
+            color: var(--text) !important;
+        }
+
+        /* Sidebar text */
+        .css-1d391kg, .stSidebar, .sidebar .block-container { color: var(--text) !important; }
+
+        /* Muted/helper text */
+        small, .app-sub, .inspire { color: var(--muted-2) !important; }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Header
+    cols = st.columns([0.08, 0.92])
+    with cols[0]:
+        st.markdown("<div class='app-logo'></div>", unsafe_allow_html=True)
+    with cols[1]:
+        st.markdown("<div class='app-header'><div><h1 class='app-title'>Sistema de Estoque</h1><div class='app-sub'>Controle completo de entradas e saídas</div></div></div>", unsafe_allow_html=True)
+
+    tab_entrada, tab_saida, tab_rel = st.tabs(["Entrada", "Saída", "Relatórios"])
+
+    # --- Aba Entrada ---
+    with tab_entrada:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("Registrar Entrada")
+        st.write("Adicione novos itens ao estoque ou aumente a quantidade")
+        with st.form("form_entrada"):
+            left, right = st.columns([3, 1])
+            with left:
+                nome_item = st.text_input("Nome do Item *", placeholder="Ex: Caderno A4")
+                responsavel = st.text_input("Responsável pelo Recebimento *", placeholder="Nome do responsável")
+            with right:
+                quantidade = st.number_input("Quantidade *", min_value=1, step=1, value=1)
+                usar_data = st.checkbox("Informar Data/Hora (Opcional)")
+                data_hora = None
+                if usar_data:
+                    data = st.date_input("Data")
+                    hora = st.time_input("Hora")
+                    data_hora = datetime.combine(data, hora).strftime("%Y-%m-%d %H:%M:%S")
+            submitted = st.form_submit_button("Registrar Entrada")
+        if submitted:
+            if nome_item.strip() == "" or responsavel.strip() == "":
+                st.error("Preencha os campos obrigatórios (Nome e Responsável).")
+            else:
+                adicionar_estoque_com_data(nome_item.strip(), int(quantidade), responsavel.strip(), data_hora)
+                st.success(f"Item '{nome_item}' registrado/atualizado com sucesso.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- Aba Saída ---
+    with tab_saida:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("Registrar Saída")
+        df_estoque = get_estoque()
+        if df_estoque.empty:
+            st.info("Estoque vazio.")
+        else:
+            with st.form("form_saida"):
+                nome_selecionado = st.selectbox("Selecione o Item", df_estoque['nome'])
+                quantidade_saida = st.number_input("Quantidade a Retirar", min_value=1, step=1)
+                responsavel_retirada = st.text_input("Responsável pela Retirada")
+                sub_saida = st.form_submit_button("Registrar Saída")
+            if sub_saida:
+                if responsavel_retirada.strip() == "":
+                    st.error("Preencha o responsável.")
+                else:
+                    sucesso, msg = retirar_estoque(nome_selecionado, int(quantidade_saida), responsavel_retirada.strip())
+                    if sucesso:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # --- Aba Relatórios ---
+    with tab_rel:
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.subheader("Relatório de Estoque Atual")
+        df = get_estoque()
+        if df.empty:
+            st.info("Estoque vazio.")
+        else:
+            st.dataframe(df)
+
+        st.subheader("Histórico de Movimentações")
+        df_hist = get_historico()
+        if df_hist.empty:
+            st.info("Sem movimentações registradas.")
+        else:
+            excluir_id = st.number_input("ID do registro para excluir (para remover do histórico)", min_value=1, step=1)
+            if st.button("Excluir Registro de Histórico"):
+                excluir_historico(excluir_id)
+                st.success("Registro excluído.")
+            st.dataframe(df_hist)
+
+        st.subheader("Excluir Item do Estoque")
+        df_items = get_estoque()
+        if not df_items.empty:
+            item_para_excluir = st.selectbox("Selecione o item a excluir", df_items['nome'])
+            if st.button("Excluir Item"):
+                excluir_item(item_para_excluir)
+                st.success(f"Item '{item_para_excluir}' excluído do estoque.")
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    # Footer / inspirational line
+    st.markdown("<div class='inspire'>" +
+                "<small>" +
+                "<b>Organize</b> com carinho — pequenas ações hoje geram grandes resultados amanhã." +
+                "</small></div>", unsafe_allow_html=True)
+
+# --- Fim do Código ---
