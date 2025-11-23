@@ -86,7 +86,7 @@ class DatabaseManager:
                     role TEXT DEFAULT 'user'
                 )
             ''')
-            # Tabela de Estoque (Adicionado: categoria, preço, estoque minimo)
+            # Tabela de Estoque
             c.execute('''
                 CREATE TABLE IF NOT EXISTS estoque (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -142,6 +142,28 @@ def autenticar(username, password):
         result = c.fetchone()
         return result[0] if result else None
 
+def criar_usuario(username, password, role):
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            pwd_hash = hash_password(password)
+            c.execute("INSERT INTO usuarios (username, password_hash, role) VALUES (?, ?, ?)", 
+                      (username, pwd_hash, role))
+        return True, "Usuário criado com sucesso!"
+    except sqlite3.IntegrityError:
+        return False, "Nome de usuário já existe."
+    except Exception as e:
+        return False, f"Erro ao criar usuário: {e}"
+
+def excluir_usuario(user_id):
+    try:
+        with db.get_connection() as conn:
+            c = conn.cursor()
+            c.execute("DELETE FROM usuarios WHERE id = ?", (user_id,))
+        return True, "Usuário excluído com sucesso."
+    except Exception as e:
+        return False, f"Erro ao excluir: {e}"
+
 def registrar_movimentacao(nome, qtd, tipo, responsavel, preco_unit=0):
     with db.get_connection() as conn:
         c = conn.cursor()
@@ -154,7 +176,6 @@ def registrar_movimentacao(nome, qtd, tipo, responsavel, preco_unit=0):
             row = c.fetchone()
             if row:
                 nova_qtd = row[0] + qtd
-                # Atualiza preço médio ou mantém o último (regra simples: atualiza para o novo)
                 c.execute("""
                     UPDATE estoque SET quantidade = ?, responsavel = ?, data_entrada = ?, preco_unitario = ? 
                     WHERE nome = ?
@@ -213,21 +234,18 @@ def dashboard_screen():
     st.title("📊 Dashboard Executivo")
     st.markdown("---")
     
-    # Carregar dados
     df = get_dataframe("SELECT * FROM estoque")
     
     if df.empty:
         st.info("Nenhum dado disponível no estoque. Comece adicionando itens.")
         return
 
-    # Cálculos de KPI
     df['valor_total'] = df['quantidade'] * df['preco_unitario']
     total_itens = df['quantidade'].sum()
     valor_patrimonio = df['valor_total'].sum()
     itens_baixo_estoque = df[df['quantidade'] <= df['estoque_minimo']].shape[0]
     categorias = df['categoria'].nunique()
 
-    # Cards KPI
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Itens em Estoque", f"{total_itens:,.0f}")
     c2.metric("Valor Patrimonial", format_currency(valor_patrimonio))
@@ -257,7 +275,6 @@ def dashboard_screen():
         ).properties(height=300)
         st.altair_chart(chart_bar, use_container_width=True)
 
-    # Tabela de Alerta
     if itens_baixo_estoque > 0:
         st.warning(f"⚠️ Atenção! {itens_baixo_estoque} itens estão abaixo do estoque mínimo.")
         st.dataframe(
@@ -271,7 +288,6 @@ def operacoes_screen():
     
     tab1, tab2 = st.tabs(["📥 Entrada (Compra/Devolução)", "📤 Saída (Venda/Uso)"])
     
-    # Lista de produtos para autocomplete
     df_prods = get_dataframe("SELECT nome FROM estoque")
     lista_prods = df_prods['nome'].tolist() if not df_prods.empty else []
 
@@ -279,9 +295,7 @@ def operacoes_screen():
         st.subheader("Registrar Nova Entrada")
         col1, col2 = st.columns(2)
         with col1:
-            nome_in = st.text_input("Nome do Produto", placeholder="Digite ou selecione...") # Autocomplete seria ideal com st_searchbox externo, aqui usamos text simples
-            # Dica: Se quiser dropdown para existentes, use:
-            # nome_in = st.selectbox("Selecione ou Digite", options=lista_prods + ["Novo Item..."])
+            nome_in = st.text_input("Nome do Produto", placeholder="Digite ou selecione...")
             qtd_in = st.number_input("Quantidade", min_value=1, value=1, key="qtd_in")
         with col2:
             preco_in = st.number_input("Preço Unitário (R$)", min_value=0.0, format="%.2f", key="price_in")
@@ -325,7 +339,6 @@ def inventario_screen():
     
     df = get_dataframe("SELECT id, nome, categoria, quantidade, preco_unitario, estoque_minimo, responsavel FROM estoque")
     
-    # Editor de Dados (Excel-like)
     edited_df = st.data_editor(
         df,
         column_config={
@@ -340,13 +353,10 @@ def inventario_screen():
         key="data_editor"
     )
     
-    # Botão para salvar alterações em massa
     if st.button("💾 Salvar Alterações"):
         try:
             with db.get_connection() as conn:
                 c = conn.cursor()
-                # Itera sobre o DF editado e atualiza o banco
-                # Nota: Em produção, compare o diff para ser mais eficiente
                 for index, row in edited_df.iterrows():
                     c.execute("""
                         UPDATE estoque 
@@ -368,15 +378,12 @@ def relatorios_screen():
     
     if tipo_rel == "Histórico Completo":
         st.dataframe(df_hist, use_container_width=True, hide_index=True)
-        
-        # Botão Download
         csv = df_hist.to_csv(index=False).encode('utf-8')
         st.download_button("📥 Baixar CSV", data=csv, file_name="historico_completo.csv", mime="text/csv")
         
     else:
         df_hist['data_hora'] = pd.to_datetime(df_hist['data_hora'])
         df_hist['date'] = df_hist['data_hora'].dt.date
-        
         daily = df_hist.groupby(['date', 'tipo'])['quantidade'].sum().reset_index()
         
         chart = alt.Chart(daily).mark_line(point=True).encode(
@@ -387,6 +394,58 @@ def relatorios_screen():
         ).interactive()
         
         st.altair_chart(chart, use_container_width=True)
+
+def admin_screen():
+    st.title("🛡️ Administração de Usuários")
+    st.info("Área exclusiva para Administradores")
+
+    tab_novo, tab_lista = st.tabs(["➕ Cadastrar Novo Usuário", "📋 Gerenciar Usuários"])
+
+    with tab_novo:
+        st.subheader("Novo Usuário")
+        with st.form("new_user_form"):
+            new_user = st.text_input("Nome de Usuário (Login)")
+            new_pass = st.text_input("Senha", type="password")
+            new_role = st.selectbox("Perfil de Acesso", ["user", "admin"], format_func=lambda x: "Administrador" if x == 'admin' else "Operador")
+            
+            if st.form_submit_button("Cadastrar Usuário"):
+                if new_user and new_pass:
+                    ok, msg = criar_usuario(new_user, new_pass, new_role)
+                    if ok:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Preencha usuário e senha.")
+
+    with tab_lista:
+        st.subheader("Usuários Ativos")
+        df_users = get_dataframe("SELECT id, username, role FROM usuarios")
+        
+        # Mostra a tabela de forma bonita
+        for index, row in df_users.iterrows():
+            col1, col2, col3, col4 = st.columns([1, 2, 2, 1])
+            with col1:
+                st.write(f"#{row['id']}")
+            with col2:
+                st.write(f"**{row['username']}**")
+            with col3:
+                role_badge = "🛡️ Admin" if row['role'] == 'admin' else "👤 Operador"
+                st.write(role_badge)
+            with col4:
+                # Impede exclusão do próprio usuário logado ou do admin principal se for o caso
+                if row['username'] == st.session_state['username']:
+                    st.caption("Você")
+                else:
+                    if st.button("🗑️", key=f"del_{row['id']}", help="Excluir usuário"):
+                        ok, msg = excluir_usuario(row['id'])
+                        if ok:
+                            st.toast(msg)
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.error(msg)
+            st.divider()
 
 # --- MAIN APP FLOW ---
 
@@ -399,13 +458,23 @@ def main():
     else:
         # Sidebar Navigation
         with st.sidebar:
-            st.title("StockMaster v2.0")
+            st.title("StockMaster v2.1")
             st.write(f"Olá, **{st.session_state['username']}**")
+            
+            # Badge de Role
+            role_label = "Administrador" if st.session_state['role'] == 'admin' else "Operador"
+            st.caption(f"Perfil: {role_label}")
+            
             st.markdown("---")
+            
+            # Opções de Menu
+            options = ["Dashboard", "Operações", "Inventário", "Relatórios"]
+            if st.session_state['role'] == 'admin':
+                options.append("Administração")
             
             menu = st.radio(
                 "Navegação", 
-                ["Dashboard", "Operações", "Inventário", "Relatórios"],
+                options,
                 index=0,
                 label_visibility="collapsed"
             )
@@ -415,7 +484,6 @@ def main():
                 st.session_state['logged_in'] = False
                 st.rerun()
             
-            # Mobile QR (Mantido do original pois é útil)
             with st.expander("📱 Acesso Mobile"):
                 try:
                     import socket
@@ -437,6 +505,8 @@ def main():
             inventario_screen()
         elif menu == "Relatórios":
             relatorios_screen()
+        elif menu == "Administração":
+            admin_screen()
 
 if __name__ == "__main__":
     main()
